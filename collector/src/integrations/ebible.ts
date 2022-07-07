@@ -40,51 +40,38 @@ export async function discover():Promise<void>{
     // Load language data
     const language_data = get_language_data()
 
+    // Track changes
+    const added = []
+    const exists = []
+
     // Add each translation in the CSV file
     // Do concurrently since each involves a network request
     await concurrent(rows.map(row => async () => {
 
-        // Determine ids etc
+        // Warn if invalid language
         const ebible_id = row['translationId']
-        const lang_code = language_data.normalise(row['FCBHID'].slice(0, 3))!
+        const lang_code = language_data.normalise(row['languageCode'])
+        if (!lang_code){
+            console.error(`IGNORED ${ebible_id} (unknown language)`)
+            return
+        }
+
+        // Determine ids
         const trans_abbr = row['FCBHID'].slice(3).toLowerCase()
         const trans_id = `${lang_code}_${trans_abbr}`
         const log_ids = `${trans_id}/${ebible_id}`
-
-        // Warn if invalid language
-        if (!lang_code){
-            console.error(`IGNORED ${log_ids} (unknown language)`)
-            return
-        }
 
         // Skip if already discovered
         const trans_dir = join('sources', trans_id)
         const meta_file = join(trans_dir, 'meta.json')
         if (existsSync(meta_file)){
-            console.info(`EXISTS ${log_ids}`)
+            exists.push(ebible_id)
             return
         }
 
         // Get translation's details page to see what data formats are available
         const ebible_url = `https://ebible.org/Scriptures/details.php?id=${ebible_id}`
         const page_resp = await request(ebible_url, 'text')
-
-        // Detect source format and url
-        let source_format:'usfm'|'sword' = 'usfm'
-        let source_url = `https://ebible.org/Scriptures/${ebible_id}_usfm.zip`
-        if (page_resp.includes('usfm.zip')){
-            // USFM
-        } else {
-            const sword_url = /['"]https:\/\/ebible\.org\/sword\/.+\.zip['"]/i.exec(page_resp)?.[0]
-            if (sword_url){
-                source_format = 'sword'
-                source_url = sword_url
-            } else {
-                console.warn(`IGNORED ${log_ids} (no suitable format)`)
-                return
-            }
-        }
-        console.info(`ADDING ${log_ids}`)
 
         // Detect the license
         let license:string|null = null
@@ -98,8 +85,18 @@ export async function discover():Promise<void>{
                 console.error(`Failed to detect CC license: ${license}`)
                 license = null
             }
-        } else if (/public domain/i.test(page_resp)){
+        } else if (/public domain/i.test(page_resp) && !/not public domain/i.test(page_resp)){
             license = 'public'
+        }
+
+        // Ignore if no USFM source (almost always because license is restrictive)
+        if (!page_resp.includes('usfm.zip')){
+            if (license){
+                console.error(`IGNORED ${log_ids} (no USFM even though unrestricted license?)`)
+            } else {
+                console.warn(`IGNORED ${log_ids} (probably restricted)`)
+            }
+            return
         }
 
         // Prepare the meta data
@@ -123,8 +120,8 @@ export async function discover():Promise<void>{
             source: {
                 service: 'ebible',
                 id: ebible_id,
-                format: source_format,
-                url: source_url,
+                format: 'usfm',
+                url: `https://ebible.org/Scriptures/${ebible_id}_usfm.zip`,
                 updated: row['UpdateDate'],
             },
             obsoleted_by: null,
@@ -134,7 +131,12 @@ export async function discover():Promise<void>{
         // Save meta file
         mkdirSync(trans_dir, {recursive: true})
         writeFileSync(meta_file, JSON.stringify(meta))
+        added.push(ebible_id)
     }))
+
+    // Report stats
+    console.info(`New: ${added.length}`)
+    console.info(`Existing: ${exists.length}`)
 }
 
 
